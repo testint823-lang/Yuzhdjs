@@ -36,7 +36,7 @@ app = Client("broadcast_bot", API_ID, API_HASH, bot_token=BOT_TOKEN)
 class BroadcastSystem:
     def __init__(self):
         self.mongo_client = MongoClient(MONGO_URL)
-        self.anon_db = self.mongo_client["Anon"]
+        self.anon_db = self.mongo_client["Yukki"]
         
         self.broadcast_message = None
         self.broadcast_keyboard = None
