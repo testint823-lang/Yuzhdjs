@@ -7,18 +7,29 @@ from pymongo import MongoClient
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
 from pyrogram.errors import FloodWait, UserIsBlocked, ChatWriteForbidden
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Load from environment variables
-API_ID = int(os.getenv('TELEGRAM_API_ID', '28620311'))
-API_HASH = os.getenv('TELEGRAM_API_HASH', '3b5c4ed0598e48fc1ab552675555e693')
-BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '7425168690:AAEUJnjKry6XUdukb1OiGUGXfWNE-V6HHSU')
-MONGO_URL = os.getenv('MONGO_URL', 'mongodb://Aditya:0099@cluster0-shard-00-00.vvcyc.mongodb.net:27017,cluster0-shard-00-01.vvcyc.mongodb.net:27017,cluster0-shard-00-02.vvcyc.mongodb.net:27017/?ssl=true&authSource=admin&retryWrites=true&w=majority')
+API_ID = int(os.getenv('TELEGRAM_API_ID'))
+API_HASH = os.getenv('TELEGRAM_API_HASH')
+BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+MONGO_URL = os.getenv('MONGO_URL')
 
-# Admin user IDs (ye change kar lo apne admin IDs se)
-ADMIN_IDS = [7355827552]  # Apna user ID yahan add karo
+# Admin user IDs - comma separated string se list banao
+ADMIN_IDS_STR = os.getenv('ADMIN_IDS', '7355827552')
+ADMIN_IDS = [int(id.strip()) for id in ADMIN_IDS_STR.split(',')]
 
 ACTIVE_CHATS_FILE = 'chats.json'
 FAILED_CHATS_FILE = 'failed_chats.json'
+
+# Verify all credentials are loaded
+if not all([API_ID, API_HASH, BOT_TOKEN, MONGO_URL]):
+    print("❌ Error: .env file me saare credentials nahi hain!")
+    print("✅ Solution: .env file check karo aur saare variables add karo")
+    exit(1)
 
 app = Client("broadcast_bot", API_ID, API_HASH, bot_token=BOT_TOKEN)
 
@@ -214,20 +225,22 @@ async def start_command(client, message: Message):
     if user_id in ADMIN_IDS:
         text = (
             "👋 **Welcome Admin!**\n\n"
-            "🎯 **Broadcast Commands:**\n"
-            "• Koi bhi message, photo, video, document forward karo broadcast ke liye\n"
-            "• Message me text, caption, buttons, formatting sab copy hoga\n\n"
-            "📊 **Other Commands:**\n"
+            "🎯 **Broadcast Kaise Kare:**\n"
+            "• Koi bhi message, photo, video, document forward karo\n"
+            "• Bot confirm karega, `yes` type karo\n"
+            "• Broadcast shuru ho jayega! 🚀\n\n"
+            "📊 **Commands:**\n"
             "• /stats - Database statistics\n"
-            "• /broadcast_stats - Broadcast statistics\n\n"
+            "• /broadcast_stats - Broadcast statistics\n"
+            "• /clear_failed - Failed chats clear karo\n\n"
             "⚡ **Features:**\n"
-            "✅ Support all message types\n"
+            "✅ All message types support\n"
             "✅ Automatic rate limiting\n"
-            "✅ Failed chats tracking\n"
-            "✅ Real-time progress updates"
+            "✅ Real-time progress\n"
+            "✅ Failed chats tracking"
         )
     else:
-        text = "👋 Hello! I'm a broadcast bot. Only admins can use me."
+        text = "👋 Hello! I'm a broadcast bot.\n\n❌ Only admins can use me."
     
     await message.reply(text)
 
@@ -296,8 +309,38 @@ async def clear_failed_command(client, message: Message):
     
     await message.reply(f"✅ {count} failed chats cleared!")
 
+# Command: /help
+@app.on_message(filters.command("help"))
+async def help_command(client, message: Message):
+    user_id = message.from_user.id
+    
+    if user_id not in ADMIN_IDS:
+        await message.reply("❌ Only admins can use this command!")
+        return
+    
+    help_text = (
+        "📖 **Bot Help Guide**\n\n"
+        "🎯 **Broadcast Kaise Kare:**\n"
+        "1. Bot ko private message karo\n"
+        "2. Koi bhi message bhejo (text/photo/video)\n"
+        "3. `yes` type karke confirm karo\n"
+        "4. Done! 🚀\n\n"
+        "📊 **Available Commands:**\n"
+        "• /start - Bot info\n"
+        "• /stats - Database statistics\n"
+        "• /broadcast_stats - Broadcast stats\n"
+        "• /clear_failed - Failed chats clear\n"
+        "• /help - Ye message\n\n"
+        "💡 **Tips:**\n"
+        "• Formatting aur buttons preserve honge\n"
+        "• Progress real-time dikhega\n"
+        "• Failed chats automatically skip honge"
+    )
+    
+    await message.reply(help_text)
+
 # Broadcast handler - Koi bhi message forward karo
-@app.on_message(filters.private & ~filters.command(["start", "stats", "broadcast_stats", "clear_failed"]))
+@app.on_message(filters.private & ~filters.command(["start", "stats", "broadcast_stats", "clear_failed", "help"]))
 async def broadcast_handler(client, message: Message):
     user_id = message.from_user.id
     
@@ -315,7 +358,8 @@ async def broadcast_handler(client, message: Message):
     confirm_msg = await message.reply(
         "🔄 **Ready to Broadcast!**\n\n"
         "⚡ Is message ko sabhi users aur groups me bhejne ke liye confirm karo.\n\n"
-        "Type: `yes` to confirm"
+        "Type: `yes` to confirm\n"
+        "Type: `no` to cancel"
     )
     
     # Wait for confirmation
@@ -340,7 +384,7 @@ async def broadcast_handler(client, message: Message):
         await message.reply(f"❌ Error: {str(e)}")
 
 # Group me message handler - Admin group me message bheje toh broadcast
-@app.on_message(filters.group)
+@app.on_message(filters.group & filters.command("broadcast"))
 async def group_broadcast_handler(client, message: Message):
     user_id = message.from_user.id
     
@@ -353,23 +397,26 @@ async def group_broadcast_handler(client, message: Message):
         await message.reply("⚠️ Ek broadcast already chal raha hai!")
         return
     
-    # Check if message has /broadcast command or is a reply to bot
-    if message.text and message.text.startswith("/broadcast"):
-        # Get message to broadcast (replied message or next message)
-        if message.reply_to_message:
-            broadcast_msg = message.reply_to_message
-        else:
-            await message.reply("⚠️ Kisi message ko reply karke /broadcast use karo")
-            return
-        
+    # Get message to broadcast (replied message)
+    if message.reply_to_message:
+        broadcast_msg = message.reply_to_message
         status_msg = await message.reply("⏳ Broadcast start ho raha hai...")
         
         # Start broadcast
         await broadcast_system.start_broadcast(broadcast_msg, status_msg)
+    else:
+        await message.reply("⚠️ Kisi message ko reply karke /broadcast use karo")
 
-print("✅ Bot is starting...")
+print("=" * 50)
+print("✅ Bot successfully started!")
+print("=" * 50)
 print(f"👤 Admin IDs: {ADMIN_IDS}")
-print("📡 Bot is now running...")
+print(f"📊 MongoDB Connected: {MONGO_URL[:30]}...")
+print(f"🤖 Bot Token: {BOT_TOKEN[:20]}...")
+print("=" * 50)
+print("📡 Bot is now running and listening...")
+print("Press Ctrl+C to stop")
+print("=" * 50)
 
 # Run bot
 app.run()
