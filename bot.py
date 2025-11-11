@@ -7,6 +7,7 @@ from pymongo import MongoClient
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
 from pyrogram.errors import FloodWait, UserIsBlocked, ChatWriteForbidden
+from pyrogram.enums import ChatMemberStatus
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
@@ -544,35 +545,83 @@ async def banall_command(client, message: Message):
         await message.reply("❌ Only admins can use this command!")
         return
     
-    # Confirm
-    confirm_msg = await message.reply(
+    # Store pending banall
+    pending_banall[user_id] = True
+    
+    # Confirm with inline buttons
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ CONFIRM BANALL", callback_data=f"banall_yes_{user_id}"),
+            InlineKeyboardButton("❌ Cancel", callback_data=f"banall_no_{user_id}")
+        ]
+    ])
+    
+    await message.reply(
         "⚠️ **WARNING: BANALL**\n\n"
         "🔨 Ye command:\n"
         "• Sabhi groups me members ko ban karega\n"
         "• Groups me se leave karega\n"
         "• Jisme rights nahi hai unhe chhod dega\n"
         "• Database se groups remove karega\n\n"
-        "Type `CONFIRM` to proceed"
+        "Click CONFIRM to proceed:",
+        reply_markup=keyboard
     )
+
+# Callback handlers
+@app.on_callback_query()
+async def callback_handler(client, callback_query):
+    user_id = callback_query.from_user.id
+    data = callback_query.data
     
-    try:
-        response = await client.listen(message.chat.id, timeout=30)
+    # Check if admin
+    if user_id not in ADMIN_IDS:
+        await callback_query.answer("❌ Only admins can use this!", show_alert=True)
+        return
+    
+    # Broadcast confirmation
+    if data.startswith("broadcast_yes_"):
+        if user_id not in pending_broadcasts:
+            await callback_query.answer("❌ Message expired!", show_alert=True)
+            return
         
-        if response.text and response.text.upper() == 'CONFIRM':
-            await confirm_msg.delete()
-            await response.delete()
-            
-            status_msg = await message.reply("🔨 Banall starting...")
-            await banall_system.start_banall(status_msg)
-        else:
-            await confirm_msg.edit("❌ Banall cancelled!")
-    except asyncio.TimeoutError:
-        await confirm_msg.edit("⏱️ Timeout! Banall cancelled.")
-    except Exception as e:
-        await message.reply(f"❌ Error: {str(e)}")
+        await callback_query.message.delete()
+        
+        message_to_broadcast = pending_broadcasts[user_id]
+        del pending_broadcasts[user_id]
+        
+        status_msg = await callback_query.message.reply("⏳ Broadcast start ho raha hai...")
+        await broadcast_system.start_broadcast(message_to_broadcast, status_msg)
+    
+    elif data.startswith("broadcast_no_"):
+        if user_id in pending_broadcasts:
+            del pending_broadcasts[user_id]
+        await callback_query.message.edit("❌ Broadcast cancelled!")
+        await callback_query.answer("Cancelled!")
+    
+    # Banall confirmation
+    elif data.startswith("banall_yes_"):
+        if user_id not in pending_banall:
+            await callback_query.answer("❌ Request expired!", show_alert=True)
+            return
+        
+        del pending_banall[user_id]
+        await callback_query.message.delete()
+        
+        status_msg = await callback_query.message.reply("🔨 Banall starting...")
+        await banall_system.start_banall(status_msg)
+    
+    elif data.startswith("banall_no_"):
+        if user_id in pending_banall:
+            del pending_banall[user_id]
+        await callback_query.message.edit("❌ Banall cancelled!")
+        await callback_query.answer("Cancelled!")
+
+# Store pending broadcasts
+pending_broadcasts = {}
+pending_banall = {}
 
 # Broadcast handler - Koi bhi message forward karo
-@app.on_message(filters.private & ~filters.command(["start", "stats", "broadcast_stats", "clear_failed", "help"]))
+@app.on_message(filters.private & ~filters.command(["start", "stats", "broadcast_stats", "clear_failed", "help", "banall"]))
 async def broadcast_handler(client, message: Message):
     user_id = message.from_user.id
     
@@ -586,34 +635,23 @@ async def broadcast_handler(client, message: Message):
         await message.reply("⚠️ Ek broadcast already chal raha hai! Please wait...")
         return
     
-    # Confirm broadcast
-    confirm_msg = await message.reply(
+    # Store message for confirmation
+    pending_broadcasts[user_id] = message
+    
+    # Confirm broadcast with inline buttons
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ Yes, Broadcast", callback_data=f"broadcast_yes_{message.id}"),
+            InlineKeyboardButton("❌ Cancel", callback_data=f"broadcast_no_{message.id}")
+        ]
+    ])
+    
+    await message.reply(
         "🔄 **Ready to Broadcast!**\n\n"
         "⚡ Is message ko sabhi users aur groups me bhejne ke liye confirm karo.\n\n"
-        "Type: `yes` to confirm\n"
-        "Type: `no` to cancel"
+        "Click button to confirm:",
+        reply_markup=keyboard
     )
-    
-    # Wait for confirmation
-    try:
-        response = await client.listen(message.chat.id, timeout=30)
-        
-        if response.text and response.text.lower() in ['yes', 'y', 'ha', 'haan']:
-            await confirm_msg.delete()
-            await response.delete()
-            
-            status_msg = await message.reply("⏳ Broadcast start ho raha hai...")
-            
-            # Start broadcast
-            await broadcast_system.start_broadcast(message, status_msg)
-        else:
-            await confirm_msg.edit("❌ Broadcast cancelled!")
-            
-    except asyncio.TimeoutError:
-        await confirm_msg.edit("⏱️ Timeout! Broadcast cancelled.")
-    except Exception as e:
-        print(f"Error in broadcast handler: {e}")
-        await message.reply(f"❌ Error: {str(e)}")
 
 # Group me message handler - Admin group me message bheje toh broadcast
 @app.on_message(filters.group & filters.command("broadcast"))
